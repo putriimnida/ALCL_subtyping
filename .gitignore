@@ -16,3 +16,5 @@
 *.h5Seurat
 *.h5ad
 *.loom
+
+~$*.xlsx
