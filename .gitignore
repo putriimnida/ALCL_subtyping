@@ -1,0 +1,18 @@
+# R session
+.RData
+.Rhistory
+.Ruserdata
+
+# RStudio
+.Rproj.user/
+
+# macOS
+.DS_Store
+**/.DS_Store
+
+# Large objects
+*.rds
+*.rda
+*.h5Seurat
+*.h5ad
+*.loom

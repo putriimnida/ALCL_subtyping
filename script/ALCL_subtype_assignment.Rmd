@@ -1,0 +1,720 @@
+---
+title: "ALCL_subtype_assignment"
+author: "Putri Ramadani"
+date: "2026-01-14"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+1. Load necessary library
+```{r}
+library(data.table)
+library(readxl)
+library(dplyr)
+library(stringr)
+library(ggplot2)
+library(ComplexHeatmap)
+library(circlize)
+library(grid)
+
+# edgeR & singscore
+if (!requireNamespace("edgeR", quietly = TRUE)) install.packages("edgeR")
+library(edgeR)
+devtools::install_github('DavisLaboratory/singscore')
+library(singscore)
+
+# Optional: read GEO SOFT locally
+BiocManager::install("GEOquery", update = FALSE, ask = FALSE)
+library(GEOquery)
+
+```
+
+2. Paths and directory
+```{r}
+getwd()
+# [1] "/Users/putriramadani/Documents/GitHub/ALCL_subtyping/script"
+root <- normalizePath("..")
+root
+# [1] "/Users/putriramadani/Documents/GitHub/ALCL_subtyping"
+
+data_dir <- file.path(root, "data")
+fig_dir  <- file.path(root, "figures")
+res_dir  <- file.path(root, "result")
+
+counts_file <- file.path(data_dir, "GSE280480_20241017-RawGeneCounts-For-GEO.txt")
+soft_file   <- file.path(data_dir, "GSE280480_family.soft")
+gene_xlsx   <- file.path(data_dir, "ALCL_subtype_gene_list.xlsx")
+```
+
+3. Load raw counts
+```{r}
+counts_dt <- read.delim(counts_file, header = FALSE, check.names = FALSE)
+
+new_header <- as.character(unlist(counts_dt[1, ]))
+counts_dt2 <- counts_dt[-1, ]
+colnames(counts_dt2) <- new_header
+
+genes <- counts_dt2[[1]]
+counts <- as.matrix(counts_dt2[, -1])
+rownames(counts) <- genes
+mode(counts) <- "numeric"
+
+# check:
+dim(counts) 
+# [1] 64253   393
+head(colnames(counts), 10)   
+# [1] "53"  "59"  "88"  "91"  "133" "178" "190" "237" "238" "240"
+counts[1:3, 1:4]
+#                                        53  59  88  91
+# ENSG00000223972@DDX11L1@11869@14409     0   0   2   1
+# ENSG00000227232@WASH7P@14404@29570    350 386 622 530
+# ENSG00000278267@MIR6859-1@17369@17436   0  59   0   0
+summary(colSums(counts))    
+#     Min.   1st Qu.    Median      Mean   3rd Qu.      Max. 
+#  4549550  33782211  47561129  50734564  62759455 145752710 
+
+
+```
+
+4. Convert gene IDs to gene symbols (and sum duplicates) to match gene list on excel file
+```{r}
+# WHAT: Convert "ENSG@SYMBOL@start@end" to SYMBOL and collapse duplicate symbols by SUM
+# WHY: My signature gene list is in gene symbols; summing keeps all signal
+
+genes_raw <- counts_dt2[[1]]
+symbol <- sub("^[^@]+@([^@]+)@.*$", "\\1", genes_raw)
+
+counts_num <- counts_dt2[, -1, drop = FALSE]
+counts_num[] <- lapply(counts_num, as.numeric)
+
+counts_sym <- aggregate(. ~ symbol,
+                        data = cbind(symbol = symbol, counts_num),
+                        FUN = sum)
+
+rownames(counts_sym) <- counts_sym$symbol
+counts <- as.matrix(counts_sym[, -1, drop = FALSE])
+
+# Note: edgeR prefers integer-ish counts; numeric is okay but let's be explicit
+storage.mode(counts) <- "numeric"
+
+# quick check:
+dim(counts)
+#[1] 58674   393
+head(rownames(counts), 10)
+# [1] "5_8S_rRNA" "5S_rRNA"   "7SK"       "A1BG"      "A1BG-AS1"  "A1CF"      "A2M"       "A2M-AS1"   "A2ML1"    
+# [10] "A2ML1-AS1"
+head(colnames(counts), 10)
+# [1] "53"  "59"  "88"  "91"  "133" "178" "190" "237" "238" "240"
+
+```
+
+5. Normalization
+```{r}
+# WHAT: Normalize raw counts with edgeR and compute logCPM
+# WHY: Removes library size effects and provides comparable expression for scoring
+
+library(edgeR)
+
+dge <- DGEList(counts = counts)
+
+# optional filtering (recommended)
+keep <- filterByExpr(dge)
+## Warning in filterByExpr.DGEList(dge) :
+##  All samples appear to belong to the same group. 
+#this warning is fine
+
+dge <- dge[keep, , keep.lib.sizes = FALSE]
+
+dge <- calcNormFactors(dge)
+logCPM <- cpm(dge, log = TRUE, prior.count = 1)
+
+dim(logCPM)
+# [1] 16488   393
+saveRDS(logCPM, file.path(res_dir, "logCPM_edgeR.rds"))
+
+```
+
+(Debugging)
+```{r}
+# --- excel file debug and cleaning --- #
+fix_excel_gene <- function(x) {
+  x <- as.character(x)
+  x <- gsub("\u00A0", " ", x)   # convert NBSP to normal space
+  x <- gsub("[\r\n\t]", " ", x) # remove hidden breaks/tabs
+  x <- trimws(x)               # trim leading/trailing
+  x <- toupper(x)              # normalize case
+  x
+}
+
+typeI_genes  <- unique(na.omit(fix_excel_gene(gene_tbl[["Type I Genes"]])))
+typeII_genes <- unique(na.omit(fix_excel_gene(gene_tbl[["Type II Genes"]])))
+
+# confirm the cleaning worked
+typeI_genes[1:10]
+"CD274" %in% typeI_genes
+
+# check overlap
+expr_genes <- toupper(rownames(logCPM))
+
+typeI_in  <- intersect(typeI_genes, expr_genes)
+typeII_in <- intersect(typeII_genes, expr_genes)
+
+cat("Type I genes present:", length(typeI_in), "/", length(typeI_genes), "\n")
+# Type I genes present: 139 / 144 
+cat("Type II genes present:", length(typeII_in), "/", length(typeII_genes), "\n")
+# Type II genes present: 42 / 50 
+# ----------------------------------------------------------------------------------- #
+
+
+# --- Recreate meta from the SOFT file --- #
+soft_lines <- readLines(soft_file, warn = FALSE)
+
+sample_start <- grep("^\\^SAMPLE", soft_lines)
+sample_end   <- c(sample_start[-1] - 1, length(soft_lines))
+
+parse_one_sample <- function(block) {
+  gsm <- sub("^\\^SAMPLE = ", "", block[grep("^\\^SAMPLE", block)][1])
+
+  title_line <- block[grep("^!Sample_title", block)]
+  title <- if (length(title_line) > 0) sub("^!Sample_title = ", "", title_line[1]) else NA_character_
+
+  chars <- block[grep("^!Sample_characteristics_ch1", block)]
+  chars <- sub("^!Sample_characteristics_ch1 = ", "", chars)
+
+  if (length(chars) == 0) return(tibble(sample = gsm, title = title))
+
+  kv <- strsplit(chars, ":", fixed = TRUE)
+  keys <- trimws(sapply(kv, `[`, 1))
+  vals <- trimws(sapply(kv, function(x) paste(x[-1], collapse=":")))
+
+  out <- as.list(vals); names(out) <- keys
+  out$sample <- gsm
+  out$title <- title
+  as_tibble(out)
+}
+
+meta <- bind_rows(lapply(seq_along(sample_start), function(i) {
+  block <- soft_lines[sample_start[i]:sample_end[i]]
+  parse_one_sample(block)
+}))
+
+dim(meta)
+head(meta[, 1:min(12, ncol(meta))])
+
+# save 
+saveRDS(meta, file.path(res_dir, "meta_from_SOFT.rds"))
+write.csv(meta, file.path(res_dir, "meta_from_SOFT.csv"), row.names = FALSE)
+
+
+# --- find the pSTAT3 field ---
+grep("pstat3|stat3", colnames(meta), ignore.case = TRUE, value = TRUE)
+# [1] "pstat3 status"
+
+table(meta$`pstat3 status`, useNA = "ifany")
+# negative positive 
+#     156      237 
+
+# --- Find which metadata column contains internal IDs (53, 59, 88, 91) ---
+ids_to_find <- c("53", "59", "88", "91")
+
+contains_id <- function(vec, id) {
+  vec <- as.character(vec)
+  any(grepl(paste0("(^|[^0-9])", id, "([^0-9]|$)"), vec, perl = TRUE))
+}
+
+cols_with_any_ids <- sapply(colnames(meta), function(cc) {
+  vec <- meta[[cc]]
+  any(sapply(ids_to_find, function(id) contains_id(vec, id)))
+})
+
+names(cols_with_any_ids)[cols_with_any_ids]
+# [1] "title"
+
+```
+
+5. Run Singscore with delta = 0
+```{r}
+# Map UPPERCASE names back to the original rownames(logCPM)
+map_upper_to_orig <- setNames(rownames(logCPM), toupper(rownames(logCPM)))
+
+typeI_in_orig  <- unname(map_upper_to_orig[typeI_in])
+typeII_in_orig <- unname(map_upper_to_orig[typeII_in])
+
+# Score
+ranked <- rankGenes(logCPM)
+
+typeI_score  <- simpleScore(ranked, upSet = typeI_in_orig)$TotalScore
+typeII_score <- simpleScore(ranked, upSet = typeII_in_orig)$TotalScore
+
+delta <- typeI_score - typeII_score
+Type_call <- ifelse(delta > 0, "Type I", "Type II")
+
+calls <- data.frame(
+  sample = colnames(logCPM),
+  TypeI_score = typeI_score,
+  TypeII_score = typeII_score,
+  delta = delta,
+  Type_call = Type_call,
+  stringsAsFactors = FALSE
+)
+
+table(calls$Type_call)
+# Type I Type II 
+#    232     161 
+
+# NOTE:
+# 232 samples were called Type I
+# 161 samples were called Type II
+# 393 samples in total
+
+# Save outputs
+write.csv(calls, file.path(res_dir, "ALCL_TypeI_TypeII_calls.csv"), row.names = FALSE)
+saveRDS(calls, file.path(res_dir, "ALCL_TypeI_TypeII_calls.rds"))
+```
+
+
+6. Compute Probabilistic Model
+Note:
+We have calls with TypeI_score, TypeII_score, delta, Type_call (from delta rule)
+meta with pstat3 status and title = internal id
+```{r}
+# --- Merge + fit probabilistic model ---
+library(dplyr)
+library(stringr)
+
+meta2 <- meta %>%
+  mutate(internal_id = str_extract(title, "\\d+")) %>%
+  mutate(internal_id = as.character(internal_id))
+
+calls2 <- calls %>%
+  left_join(meta2 %>% select(internal_id, `pstat3 status`, `alcl genetics`, `who classification`, tissue),
+            by = c("sample" = "internal_id")) %>%
+  mutate(truth_typeI = ifelse(`pstat3 status` == "positive", 1, 0))
+
+# probabilistic model
+# try 0.5
+fit <- glm(truth_typeI ~ TypeI_score + TypeII_score, data = calls2, family = binomial())
+
+calls2$prob_typeI <- predict(fit, newdata = calls2, type = "response")
+calls2$Type_call_prob <- ifelse(calls2$prob_typeI >= 0.5, "Type I", "Type II")
+
+table(calls2$Type_call_prob)
+#  Type I Type II 
+#     240     153
+# That's number of samples classified as Type I vs Type II after the probabilistic model threshold (0.5)
+
+# Check using confusion matrix & accuracy
+tab <- table(Pred = calls2$Type_call_prob,
+             Truth = ifelse(calls2$truth_typeI==1, "Type I", "Type II"))
+tab
+sum(diag(tab)) / sum(tab)
+#          Truth
+# Pred      Type I Type II
+#  Type I     216      18
+#  Type II     17     134
+
+sum(diag(tab)) / sum(tab)
+# [1] 0.9090909
+```
+Interpretation:
+- Predicted pSTAT3 status from singscore scores with ~90.9% accuracy.
+- On paper, prediction based on pSTAT3 was ~91% accurate.
+
+Note regarding confusion matrix result:
+216 samples: truth Type I AND predicted Type I 
+134 samples: truth Type II AND predicted Type II 
+18 samples: truth Type II but predicted Type I (false positives)
+17 samples: truth Type I but predicted Type II (false negatives)
+Accuracy = (216 + 134) / total = 350 / 385 = 0.909.
+
+Why total is 385, not 393?
+Because glm() automatically drops rows with missing values.
+So likely 8 samples had NA in TypeI_score or TypeII_score or pstat3 status after merging (often from join issues or missing pstat3).
+
+Simple check:
+```{r}
+sum(complete.cases(calls2[, c("TypeI_score","TypeII_score","truth_typeI")]))
+# [1] 385
+sum(is.na(calls2$`pstat3 status`))
+# [1] 8
+
+missing <- calls2 %>%
+  filter(is.na(`pstat3 status`)) %>%
+  select(sample, `alcl genetics`, `who classification`, tissue, Type_call_prob, prob_typeI)
+
+missing
+#   sample alcl genetics who classification tissue Type_call_prob prob_typeI
+# 1    323          <NA>               <NA>   <NA>         Type I  0.9387034
+# 2    371          <NA>               <NA>   <NA>         Type I  0.7163948
+# 3    375          <NA>               <NA>   <NA>        Type II  0.1166157
+# 4   2677          <NA>               <NA>   <NA>         Type I  0.9553168
+# 5   3053          <NA>               <NA>   <NA>         Type I  0.7709503
+# 6   3365          <NA>               <NA>   <NA>         Type I  0.9391672
+# 7   5444          <NA>               <NA>   <NA>         Type I  0.5284725
+# 8   7256          <NA>               <NA>   <NA>        Type II  0.1888479
+```
+Note:
+- There are 393 samples total.
+- 8 samples have pstat3 status = NA (missing in GEO metadata / SOFT parsing for those samples).
+- So only 393 − 8 = 385 samples can be used as “truth-labeled” training/evaluation data.
+
+
+(Debugging)
+```{r}
+expr_ids <- colnames(logCPM)
+soft_ids <- meta2$internal_id
+
+expr_ids <- expr_ids[!is.na(expr_ids)]
+soft_ids <- soft_ids[!is.na(soft_ids)]
+
+only_in_expr <- setdiff(expr_ids, soft_ids)
+only_in_soft <- setdiff(soft_ids, expr_ids)
+
+only_in_expr
+# [1] "323"  "371"  "375"  "2677" "3053" "3365" "5444" "7256"
+only_in_soft
+# [1] "298"  "285"  "5197" "3540" "4444" "5031" "5619" "5131"
+
+
+# Re-merge using only the matched samples
+common_ids <- intersect(expr_ids, soft_ids)
+
+calls_common <- calls %>% filter(sample %in% common_ids)
+
+meta_common <- meta2 %>% filter(internal_id %in% common_ids)
+
+calls2 <- calls_common %>%
+  left_join(meta_common %>% select(internal_id, `pstat3 status`, `alcl genetics`, `who classification`, tissue),
+            by = c("sample" = "internal_id")) %>%
+  mutate(truth_typeI = ifelse(`pstat3 status` == "positive", 1, 0))
+
+# Fit probabilistic model again (on clean matched set)
+fit <- glm(truth_typeI ~ TypeI_score + TypeII_score, data = calls2, family = binomial())
+calls2$prob_typeI <- predict(fit, newdata = calls2, type = "response")
+calls2$Type_call_prob <- ifelse(calls2$prob_typeI >= 0.5, "Type I", "Type II")
+
+tab <- table(Pred = calls2$Type_call_prob,
+             Truth = ifelse(calls2$truth_typeI==1, "Type I", "Type II"))
+tab
+sum(diag(tab)) / sum(tab)
+#          Truth
+# Pred      Type I Type II
+#   Type I     216      18
+#   Type II     17     134
+# [1] 0.9090909
+```
+
+8. Replicate figure B (on progress)
+```{r}
+# --- Build the column groups (ALK, BIA, TN-I, TN-II, DUSP22, TP63) ---
+# Check WHO classification:
+sort(unique(calls2$`who classification`))
+# [1] "ALCLNEG" "ALCLPOS" "BIAALCL" "CUTALCL"
+
+# Assign MolecularSubtype (paper panel blocks)
+calls2 <- calls2 %>%
+  mutate(
+    MolecularSubtype = case_when(
+      `who classification` == "BIAALCL" ~ "BIA",
+      `alcl genetics` == "ALK" ~ "ALK",
+      `alcl genetics` == "DUSP22" ~ "DUSP22",
+      `alcl genetics` == "TP63" ~ "TP63",
+      `alcl genetics` == "TN" & Type_call_prob == "Type I" ~ "TN-I",
+      `alcl genetics` == "TN" & Type_call_prob == "Type II" ~ "TN-II",
+      TRUE ~ "Other"
+    )
+  )
+
+# keep only the ones in the figure blocks 
+calls2_fig <- calls2 %>%
+  filter(MolecularSubtype %in% c("ALK","BIA","TN-I","TN-II","DUSP22","TP63"))
+
+table(calls2_fig$MolecularSubtype)
+#   ALK    BIA DUSP22   TN-I  TN-II   TP63 
+#   116     21     91     91     46     11 
+
+# Note:
+# Total: 376
+# 376/385 matched samples fall into the Figure-B subtype blocks, and 9 samples are “Other” 
+# (likely CUTALCL or something not included in that panel)
+
+
+# --- Order the samples in the exact block order ---
+subtype_order <- c("ALK","BIA","TN-I","TN-II","DUSP22","TP63")
+
+calls2_fig <- calls2_fig %>%
+  mutate(MolecularSubtype = factor(MolecularSubtype, levels = subtype_order)) %>%
+  arrange(MolecularSubtype, desc(prob_typeI))   # nice separation inside each block
+
+# --- Subset expression to those 376 samples, in that order ---
+logCPM_fig <- logCPM[, calls2_fig$sample, drop = FALSE]
+dim(logCPM_fig)
+# [1] 16488   376
+# 16488 genes = after edgeR filtering (filterByExpr)
+# 376 samples = exactly the subtype blocks in Figure B (ALK/BIA/TN-I/TN-II/DUSP22/TP63)
+
+
+# --- confirm gene list ---
+library(readxl)
+excel_sheets(gene_xlsx)
+# [1] "Sheet1"
+colnames(read_excel(gene_xlsx, sheet = 1))
+# [1] "Type I Genes"  "Type II Genes"
+
+
+# --- Add BIA + subtype labels ---
+# check:
+table(calls2_fig$MolecularSubtype)
+#   ALK    BIA   TN-I  TN-II DUSP22   TP63 
+#   116     21     91     46     91     11 
+
+# check raw counts for the same samples, same order
+counts_fig <- counts[, calls2_fig$sample, drop = FALSE]
+dim(counts_fig)  
+# [1] 58674   376
+
+
+# --- Run edgeR supervised signatures ---
+# NRC ≥ 50 reads in at least 0.7 × N cases (N = smaller group size)
+# keep genes with |log2FC| ≥ 2 and FDR < 0.05
+# direction = "up". Only keep genes up in the target subtype (makes “signature blocks” in the heatmap look like the paper)
+get_subtype_signature <- function(counts_mat, subtype_vec, target_subtype,
+                                  min_nrc = 50, frac = 0.7,
+                                  lfc = 2, fdr = 0.05,
+                                  direction = c("up","both")) {
+
+  direction <- match.arg(direction)
+
+  grp <- ifelse(subtype_vec == target_subtype, target_subtype, "Other")
+  grp <- factor(grp, levels = c("Other", target_subtype))
+
+  y <- DGEList(counts = counts_mat, group = grp)
+  y <- calcNormFactors(y)
+
+  # NRC filter (paper): NRC >= 50 in at least 0.7 * Nsmall samples
+  n_other  <- sum(grp == "Other")
+  n_target <- sum(grp == target_subtype)
+  Nsmall <- min(n_other, n_target)
+  req <- ceiling(frac * Nsmall)
+
+  nrc <- cpm(y, normalized.lib.sizes = TRUE, log = FALSE)
+
+  keep_gene <- rowSums(nrc[, grp == "Other",  drop = FALSE] >= min_nrc) >= req |
+               rowSums(nrc[, grp == target_subtype, drop = FALSE] >= min_nrc) >= req
+
+  y <- y[keep_gene, , keep.lib.sizes = FALSE]
+
+  design <- model.matrix(~ grp)
+  y <- estimateDisp(y, design)
+  fit <- glmQLFit(y, design)
+  qlf <- glmQLFTest(fit, coef = 2)
+
+  tt <- topTags(qlf, n = Inf)$table
+  tt <- data.frame(gene = rownames(tt), tt, check.names = FALSE)
+
+  tt <- tt[tt$FDR < fdr & abs(tt$logFC) >= lfc, , drop = FALSE]
+  if (direction == "up") tt <- tt[tt$logFC > 0, , drop = FALSE]
+
+  tt
+}
+
+subtype_vec <- calls2_fig$MolecularSubtype
+names(subtype_vec) <- calls2_fig$sample
+
+alk_tt    <- get_subtype_signature(counts_fig, subtype_vec, "ALK",    direction="up")
+bia_tt    <- get_subtype_signature(counts_fig, subtype_vec, "BIA",    direction="up")
+dusp22_tt <- get_subtype_signature(counts_fig, subtype_vec, "DUSP22", direction="up")
+tp63_tt   <- get_subtype_signature(counts_fig, subtype_vec, "TP63",   direction="up")
+
+c(ALK=nrow(alk_tt), BIA=nrow(bia_tt), DUSP22=nrow(dusp22_tt), TP63=nrow(tp63_tt))
+#    ALK    BIA DUSP22   TP63 
+#      9     39     17     25 
+
+
+# --- Freeze the subtype gene lists ---
+topN <- function(tt, n=50) {
+  tt <- tt[order(tt$FDR, -abs(tt$logFC)), , drop=FALSE]
+  head(tt$gene, n)
+}
+
+ALK_genes    <- topN(alk_tt, 50)
+ALK_genes #9
+#[1] "ALK"    "IL1R1"  "GLIS3"  "IL1RAP" "CSMD2"  "TUBB3"  "PRF1"   "CEMIP"  "IL1R2"
+BIA_genes    <- topN(bia_tt, 50)      
+BIA_genes #39
+# [1] "ITGAM"        "HSF4"         "CCL18"        "FN1"          "TIMP3"        "RNASE1"      
+# [7] "RP1-309I22.2" "MXRA5"        "COL14A1"      "CCL4"         "F13A1"        "CCL3"        
+# [13] "NLRP3"        "EGR2"         "CCL13"        "COL6A6"       "PTGIS"        "SLIT3"       
+# [19] "MRC1"         "HMCN1"        "COL12A1"      "COMP"         "MME"          "COL22A1"     
+# [25] "CD209"        "POSTN"        "FOS"          "C15orf48"     "FNDC1"        "COL11A1"     
+# [31] "MARCO"        "FCGBP"        "SFRP4"        "THBS4"        "IL9"          "MAOA"        
+# [37] "AGAP7P"       "COL6A5"       "RYR2"   
+DUSP22_genes <- topN(dusp22_tt, 50)   
+DUSP22_genes #17
+# [1] "FBLN5"      "EZH2"       "NSMCE2"     "CNTNAP1"    "MSC"        "CCDC141"    "ZYG11A"    
+# [8] "ALPK2"      "TTN"        "CCR8"       "MED12L"     "PHGDH"      "HNRNPA1P21" "BLK"       
+# [15] "FERMT1"     "CCR4"       "NLGN4Y" 
+TP63_genes   <- topN(tp63_tt, 50)     
+TP63_genes #25
+# [1] "TOB1"       "CCL5"       "ARSG"       "HGF"        "GNLY"       "TRGC2"      "IGHV1-69-2"
+# [8] "TP63"       "GZMH"       "THEMIS"     "MYO7A"      "KIR3DL1"    "SNORD3B-2"  "IGHV3-30"  
+# [15] "KIR2DL4"    "IGKV2-24"   "IGHV3-33"   "IGHV1-18"   "KIR3DL2"    "IGKV1-12"   "IGHV1-2"   
+# [22] "IGLV2-34"   "AC233755.1" "IGLV3-19"   "PRG4" 
+
+saveRDS(
+  list(
+    ALK = list(genes=ALK_genes, tt=alk_tt),
+    BIA = list(genes=BIA_genes, tt=bia_tt),
+    DUSP22 = list(genes=DUSP22_genes, tt=dusp22_tt),
+    TP63 = list(genes=TP63_genes, tt=tp63_tt)
+  ),
+  file.path(res_dir, "paper_strict_subtype_signatures.rds")
+)
+
+# --- Build the full row blocks (Type I/II from Excel + subtype signatures) ---
+gene_blocks <- list(
+  "Type I signature"  = typeI_in_orig,
+  "Type II signature" = typeII_in_orig,
+  "ALK signature"     = ALK_genes,
+  "BIA signature"     = BIA_genes,
+  "DUSP22 signature"  = DUSP22_genes,
+  "TP63 signature"    = TP63_genes
+)
+
+all_genes <- unique(unlist(gene_blocks))
+all_genes <- intersect(all_genes, rownames(logCPM_fig))
+
+mat <- logCPM_fig[all_genes, , drop = FALSE]
+
+# z-score per gene (row) + clamp to match the paper’s color scale feel
+zmat <- t(scale(t(mat)))
+zmat[zmat > 10] <- 10
+zmat[zmat < -10] <- -10
+
+# -------------------------(debugging) ------------------------------------ #
+# Build gene -> block mapping (first block wins if overlap)
+gene2block <- setNames(rep(NA_character_, nrow(zmat)), rownames(zmat))
+
+for (nm in names(gene_blocks)) {
+  g <- intersect(gene_blocks[[nm]], rownames(zmat))
+  gene2block[g[is.na(gene2block[g])]] <- nm
+}
+
+# Any genes still NA? (shouldn't happen, but just in case)
+gene2block[is.na(gene2block)] <- "Other"
+
+row_split <- factor(gene2block, levels = c(names(gene_blocks), "Other"))
+
+# check
+stopifnot(length(row_split) == nrow(zmat))
+# -------------------------------------------------------------------------- #
+
+
+# --- Plot Heatmap  ---
+library(ComplexHeatmap)
+library(circlize)
+library(grid)
+
+# 0) Required order (paper blocks)
+subtype_order <- c("ALK","BIA","TN-I","TN-II","DUSP22","TP63")
+
+# 1) Column split in the desired order
+col_split <- factor(calls2_fig$MolecularSubtype, levels = subtype_order)
+
+# 2) Make WHO a clean factor (keeps legend tidy)
+who_levels <- c("ALCLNEG","ALCLPOS","BIAALCL","CUTALCL")
+who_vec <- factor(calls2_fig$`who classification`, levels = who_levels)
+
+# --- 3) Define WHO colors ---
+who_cols <- c(
+  ALCLNEG = "#00BFC4",  # teal
+  ALCLPOS = "#2C7FB8",  # blue  (ALK+)
+  BIAALCL = "#F0E442",  # yellow
+  CUTALCL = "#F8766D"   # salmon
+)
+
+# --- 4) Define Subtype colors using your rules ---
+subtype_cols <- c(
+  ALK     = unname(who_cols["ALCLPOS"]),   # ALK same as ALK+
+  BIA     = unname(who_cols["BIAALCL"]),   # BIA same as BIA
+  `TN-I`  = "#CC79A7",
+  `TN-II` = unname(who_cols["CUTALCL"]),   # TN-II same as Cutan.
+  DUSP22  = "#7CAE00",
+  TP63    = "#E69F00"
+)
+
+
+# --- 5) Rebuild top annotation WITH color mappings ---
+ha <- HeatmapAnnotation(
+  Subtype = col_split,
+  WHO     = who_vec,
+  col = list(
+    Subtype = subtype_cols,
+    WHO     = who_cols
+  ),
+  annotation_name_side = "right",
+  annotation_legend_param = list(
+    Subtype = list(title = "Molecular Subtype", at = subtype_order),
+    WHO     = list(title = "WHO/ICC Subtype", at = who_levels)
+  )
+)
+
+# 6) Color scale FIX (important!)
+# My z quantiles showed most values are within about -2..+2,
+# so I try saturate there to make the plot colors look like the paper.
+col_fun <- colorRamp2(
+  c(-10, -2, 0, 2, 10),
+  c("green", "green", "black", "red", "red")
+)
+
+# 7) Plot
+ht <- Heatmap(
+  zmat,
+  name = "Color Key",             
+  col = col_fun,
+
+  top_annotation = ha,
+
+  row_split = row_split_simple,
+  column_split = col_split,
+
+  cluster_rows = FALSE,
+  cluster_columns = FALSE,
+
+  show_row_names = FALSE,
+  show_column_names = FALSE,
+
+  # --- FIX row-split labels overlapping ---
+  row_title_side = "left",
+  row_title_rot = 90,                        # keep vertical
+  row_title_gp = grid::gpar(fontsize = 12),  # smaller text helps
+  row_gap = unit(3, "mm")                    # add space between blocks
+)
+
+png(file.path(fig_dir, "Figure6B_paper_reproduced.png"),
+    width = 3200, height = 1800, res = 200)
+draw(ht,
+     heatmap_legend_side = "right",
+     annotation_legend_side = "right",
+     merge_legends = FALSE)
+dev.off()
+
+```
+
+
+
+
+
+```{r}
+sessionInfo()
+```
+
+```{r pressure, echo=FALSE}
+plot(pressure)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
