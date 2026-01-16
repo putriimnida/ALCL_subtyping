@@ -136,6 +136,13 @@ dim(logCPM)
 # [1] 16488   393
 saveRDS(logCPM, file.path(res_dir, "logCPM_edgeR.rds"))
 
+# load excel gene list
+library(readxl)
+gene_tbl <- read_excel(gene_xlsx) |> as.data.frame()
+colnames(gene_tbl)
+"Type I Genes"  "Type II Genes"
+head(gene_tbl, 10)
+
 ```
 
 (Debugging)
@@ -577,12 +584,12 @@ saveRDS(
 
 # --- Build the full row blocks (Type I/II from Excel + subtype signatures) ---
 gene_blocks <- list(
-  "Type I signature"  = typeI_in_orig,
-  "Type II signature" = typeII_in_orig,
-  "ALK signature"     = ALK_genes,
-  "BIA signature"     = BIA_genes,
-  "DUSP22 signature"  = DUSP22_genes,
-  "TP63 signature"    = TP63_genes
+  "Type I"  = typeI_in_orig,
+  "Type II" = typeII_in_orig,
+  "ALK"     = ALK_genes,
+  "BIA"     = BIA_genes,
+  "DUSP22"  = DUSP22_genes,
+  "TP63"    = TP63_genes
 )
 
 all_genes <- unique(unlist(gene_blocks))
@@ -679,7 +686,7 @@ ht <- Heatmap(
 
   top_annotation = ha,
 
-  row_split = row_split_simple,
+  row_split = row_split,
   column_split = col_split,
 
   cluster_rows = FALSE,
@@ -691,7 +698,7 @@ ht <- Heatmap(
   # --- FIX row-split labels overlapping ---
   row_title_side = "left",
   row_title_rot = 90,                        # keep vertical
-  row_title_gp = grid::gpar(fontsize = 12),  # smaller text helps
+  row_title_gp = grid::gpar(fontsize = 11),  # smaller text helps
   row_gap = unit(3, "mm")                    # add space between blocks
 )
 
@@ -704,8 +711,6 @@ draw(ht,
 dev.off()
 
 ```
-
-
 
 
 
