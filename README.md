@@ -1,6 +1,6 @@
 ## ALCL subtyping using RNAseq data<br>
-This repository documents a pipeline to reproduce ALCL subtyping: molecular classification of Type I and Type II, based on Feldman et al., 2026.< br>
-Fig. 6B from paper:
+This repository documents a pipeline to reproduce ALCL subtyping: molecular classification of Type I and Type II<br>
+Original Fig. 6B from the paper:
 ![Heatmap showing gene signatures associated with the molecular subtypes of ALCL](figures/Figure6B_Feldman_et_al_Heatmap_of_gene_signatures_associated_with_molecular_subtypes_of_ALCL.png)
 
 Reference:
