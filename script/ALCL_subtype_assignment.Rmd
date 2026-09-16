@@ -10,7 +10,7 @@ knitr::opts_chunk$set(echo = TRUE)
 ```
 
 
-1. Load necessary library
+1. Load library
 ```{r}
 library(data.table)
 library(readxl)
@@ -33,7 +33,7 @@ library(GEOquery)
 
 ```
 
-2. Paths and directory
+2. Paths and dir
 ```{r}
 getwd()
 # [1] "/Users/putriramadani/Documents/GitHub/ALCL_subtyping/script"
@@ -455,7 +455,7 @@ subtype_order <- c("ALK","BIA","TN-I","TN-II","DUSP22","TP63")
 
 calls2_fig <- calls2_fig %>%
   mutate(MolecularSubtype = factor(MolecularSubtype, levels = subtype_order)) %>%
-  arrange(MolecularSubtype, desc(prob_typeI))   # nice separation inside each block
+  arrange(MolecularSubtype, desc(prob_typeI))   # better separation inside each block
 
 # --- Subset expression to those 376 samples, in that order ---
 logCPM_fig <- logCPM[, calls2_fig$sample, drop = FALSE]
@@ -603,7 +603,7 @@ zmat[zmat > 10] <- 10
 zmat[zmat < -10] <- -10
 
 # -------------------------(debugging) ------------------------------------ #
-# Build gene -> block mapping (first block wins if overlap)
+# Build gene -> block mapping 
 gene2block <- setNames(rep(NA_character_, nrow(zmat)), rownames(zmat))
 
 for (nm in names(gene_blocks)) {
@@ -611,7 +611,7 @@ for (nm in names(gene_blocks)) {
   gene2block[g[is.na(gene2block[g])]] <- nm
 }
 
-# Any genes still NA? (shouldn't happen, but just in case)
+# Any genes still NA? 
 gene2block[is.na(gene2block)] <- "Other"
 
 row_split <- factor(gene2block, levels = c(names(gene_blocks), "Other"))
@@ -638,10 +638,10 @@ who_vec <- factor(calls2_fig$`who classification`, levels = who_levels)
 
 # --- 3) Define WHO colors ---
 who_cols <- c(
-  ALCLNEG = "#00BFC4",  # teal
-  ALCLPOS = "#2C7FB8",  # blue  (ALK+)
-  BIAALCL = "#F0E442",  # yellow
-  CUTALCL = "#F8766D"   # salmon
+  ALCLNEG = "#00BFC4",  
+  ALCLPOS = "#2C7FB8",  
+  BIAALCL = "#F0E442",  
+  CUTALCL = "#F8766D"  
 )
 
 # --- 4) Define Subtype colors using your rules ---
@@ -655,7 +655,7 @@ subtype_cols <- c(
 )
 
 
-# --- 5) Rebuild top annotation WITH color mappings ---
+# --- 5) Rebuild top annotation with color mappings ---
 ha <- HeatmapAnnotation(
   Subtype = col_split,
   WHO     = who_vec,
@@ -670,7 +670,7 @@ ha <- HeatmapAnnotation(
   )
 )
 
-# 6) Color scale FIX (important!)
+# 6) Color scale fix
 # My z quantiles showed most values are within about -2..+2,
 # so I try saturate there to make the plot colors look like the paper.
 col_fun <- colorRamp2(
